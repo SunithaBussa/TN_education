@@ -1,0 +1,863 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+#install.packages('readxl')
+```
+
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(caret)
+library(glmnet)
+library(rpart.plot)
+library(coefplot)
+library('ggpubr')
+library(tidyverse)
+```
+
+
+```{r}
+#Get the data
+
+districts<-read_csv('data/districts.csv')
+teacher_num<-read_csv('data/teacher_number.csv')
+household_income_by_county<-read_csv('data/household_income_by_county.csv')
+data_dist_to_county<-read_excel('data/data_district_to_county_crosswalk.xls')
+```
+```{r}
+#Rename columns
+data_dist_to_county<-data_dist_to_county %>% 
+rename(County='County Name')
+```
+
+
+```{r}
+#looking deeper into only subjects/languages and plot
+
+state_languages<-districts %>% 
+  filter(`District Number`==0) %>% 
+  pivot_longer(alg_1:science,names_to = 'Languages',values_to = 'avg_scores') %>% 
+  mutate('lang_combined'= case_when(Languages %in% c('alg_1','alg_2') ~ "algebra",
+                                    Languages %in% c('eng_1','eng_2','eng_3') ~ "english",
+                                    TRUE ~ Languages
+                                    )
+         ) %>% 
+  #select(Languages,avg_scores) %>% 
+  ggplot(aes(x=Languages,y=avg_scores,fill=lang_combined)) +
+  geom_col() +
+  geom_text(aes(label=avg_scores)) 
+
+state_languages
+```
+
+
+```{r}
+subjects<-select(districts,'District Number','District Name', enrollment,alg_1,alg_2,bio,chem,ela,eng_1,eng_2,eng_3,math,science)%>% 
+  filter(`District Number`!=0)
+
+
+head(subjects)
+```
+
+
+```{r}
+#looking into only elementarty school data
+elementary<-subjects %>% 
+  filter(is.na(alg_1) & is.na(alg_2) & is.na(bio) & is.na(chem) & is.na(eng_1),is.na(eng_2), is.na(eng_3))%>%    rowwise() %>%
+    mutate(avg_ele_score = round(mean(c(ela, math,science), na.rm = TRUE)) ,digits=2) %>%  arrange(desc(avg_ele_score)) %>% 
+    filter(`District Number` != 960)
+  
+  
+elementary 
+ggplot(elementary,aes(x=reorder(`District Name`,avg_ele_score),y=avg_ele_score,fill=`District Name`,na.rm=TRUE)) +
+   coord_flip() +
+  geom_bar(stat="identity") +
+  xlab("Counties") +
+  ylab("Average scores") +
+  ggtitle("Average Scores for Elementary schools")
+  
+```
+
+
+
+
+
+ 
+```{r}
+#find the mean, min,max graduation rates  
+districts %>%
+    filter(`District Name` != "State of Tennessee") %>%
+    summarise(
+        mean_grad = round(mean(grad, na.rm = TRUE)),
+        min_grad = min(grad, na.rm = TRUE),
+        max_grad = max(grad, na.rm = TRUE)
+    )
+
+```
+```{r}
+#something extra work
+districts %>%
+    group_by(region) %>%
+    mutate(dropout_mean = mean(dropout, na.rm = TRUE)) %>%
+    ungroup() %>%
+    filter(dropout > dropout_mean) %>%
+ 
+select(`District Name`, region, dropout, dropout_mean)
+```
+```{r}
+#get the number of teachers by county
+teacher_count<-teacher_num %>% 
+  group_by(County) %>% 
+  summarise(teachers=sum(TEACHERS)) %>% 
+  ungroup() %>% 
+  arrange(desc(teachers))
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+```{r}
+household_income<-select(household_income_by_county, `Geographic Area_1`,Dollar) %>% 
+  rename(County=`Geographic Area_1`,avg_income = Dollar)
+ 
+
+```
+
+
+```{r}
+#create a new data set which is used as your base dataset. Combine all the required Data sets.
+exploration_ds<-districts %>% 
+  inner_join(data_dist_to_county,by="District Number") %>% 
+  inner_join(teacher_count,by="County") %>% 
+  inner_join(household_income,by="County")
+
+```
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+```{r}
+#Drop columns which are not required
+#names(exploration_ds)
+#exploration_ds<-select(exploration_ds,-"SCHOOL_YEAR",-"STATENAME",-"ST",-"SCH_NAME",-"#ST_LEAID",-"SCHID")
+```
+```{r}
+names(exploration_ds)
+```
+
+```{r}
+#get the data to the county level by grouping the data.Choose the right aggregation 
+final_data_by_county<-exploration_ds %>% 
+  group_by(County,region) %>% 
+  summarise(
+          alg_1 = mean(alg_1,na.rm = TRUE),
+          alg_2 = mean(alg_2,na.rm = TRUE),
+          bio   = mean(bio,na.rm = TRUE),
+          chem  = mean(chem,na.rm = TRUE),
+          ela   = mean(ela,na.rm = TRUE),
+          eng_1 = mean(eng_1,na.rm = TRUE),
+          eng_2 = mean(eng_2,na.rm = TRUE),
+          eng_3 = mean(eng_3,na.rm = TRUE),
+          math  = mean(math,na.rm = TRUE),
+          science = mean(science,na.rm = TRUE),
+          enrollment = sum(enrollment,na.rm = TRUE),
+          black = mean(black,na.rm = TRUE),
+          hispanic = mean(hispanic,na.rm = TRUE),
+          native = mean(native,na.rm = TRUE),
+          el = mean(el,na.rm = TRUE),
+          swd = mean(swd,na.rm = TRUE),
+          ed = mean(ed,na.rm = TRUE),
+          expenditures = mean(expenditures,na.rm = TRUE),
+          act_composite = mean(act_composite,na.rm = TRUE),
+          chronic_abs = mean(chronic_abs,na.rm = TRUE),
+          suspended = mean(suspended,na.rm = TRUE),
+          expelled = mean(expelled,na.rm = TRUE),
+          grad = mean(grad,na.rm = TRUE),
+          dropout = mean(dropout,na.rm = TRUE),
+          teachers= mean(teachers,na.rm=TRUE),
+          avg_income= mean(avg_income,na.rm=TRUE)
+        ) %>% 
+  ungroup()
+
+```
+
+```{r}
+#Round all the numeric columns to the whole number
+final_data_by_county<-final_data_by_county %>% 
+  mutate_if(is.numeric,round,digits=2)
+```
+
+
+```{r}
+#count the number of missing values in each column
+ final_data_by_county[is.na(final_data_by_county)]=0
+
+#check to see if there are any missing values
+final_data_by_county %>% 
+    summarise_all(~sum(is.na(.)))
+```
+```{r}
+#get the average scores of each subject.
+final_data_by_county<-final_data_by_county %>% 
+  rowwise() %>% 
+  mutate(
+        eng_mean = mean(c(eng_1,eng_2,eng_3,ela), na.rm = TRUE),
+        math_mean = mean(c(alg_1,alg_2,math), na.rm = TRUE),
+        sci_mean = mean(c(science,bio,chem), na.rm = TRUE),
+        avg_high_score = mean(c(alg_1, alg_2,bio,chem,ela,eng_1,eng_2,eng_3,math,science), na.rm = TRUE)
+         
+        ) %>% 
+  mutate_if(is.numeric,round,digits=2) %>% 
+  ungroup()
+
+ 
+final_data_by_county[final_data_by_county$County == "Carroll County" , "teachers"] <- 292
+
+final_data_by_county<-final_data_by_county %>% 
+  mutate(student_per_teacher = enrollment/teachers)
+
+final_data_by_county<-final_data_by_county %>% 
+  mutate(exp_per_student = expenditures/enrollment)
+
+final_data_by_county<-final_data_by_county %>% 
+  mutate(is_good_ratio = ifelse(student_per_teacher<16,'good ratio','bad ratio'))
+
+```
+
+```{r}
+# High_school_scores 
+High_school_scores<-final_data_by_county %>% 
+  filter(!is.na(alg_1) & !is.na(alg_2) & !is.na(bio) & !is.na(chem) & !is.na(eng_1),!is.na(eng_2), !is.na(eng_3),!is.na(math),!is.na(science)) %>% rowwise() %>%
+  mutate(avg_high_score =round( mean(c(alg_1, alg_2,bio,chem,eng_1,eng_2,eng_3,math,science), na.rm = TRUE)))  %>% 
+ 
+  arrange(desc(avg_high_score))
+  
+
+   
+```
+
+```{r}
+#top 10 schools with average scores
+top_10_schools<-head(High_school_scores,10) %>% 
+  arrange(desc(avg_high_score)) 
+ 
+top_10_schools
+
+  
+  ggplot(top_10_schools,aes(x=reorder(`County`,avg_high_score),y=avg_high_score,fill = `County`)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=avg_high_score), vjust=0) +  
+  coord_flip() +
+    xlab("Counties") +
+    ylab("Average Scores") +
+    ggtitle("Average Scores for High Schools")
+  
+   
+```
+
+```{r}
+#schools with least averge scores
+low_10_schools<-tail(High_school_scores,10) %>% 
+  arrange(desc(avg_high_score)) 
+ 
+low_10_schools
+```
+
+```{r}
+  
+  ggplot(low_10_schools,aes(x=reorder(County,avg_high_score),y=avg_high_score,fill = County)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=avg_high_score), vjust=0) +  
+  coord_flip() +
+    xlab("Average Scores")
+    ylab("Counties")
+    ggtitle("least Average Scores High Schools")
+```
+
+```{r}
+#Student per teacher and grad rate
+final_data_by_county %>% 
+  select (grad,County,enrollment,teachers,student_per_teacher,is_good_ratio) %>% 
+  arrange(desc(student_per_teacher)) %>% 
+  ggplot(aes(x=student_per_teacher,y=grad,color=is_good_ratio)) +
+  geom_point(alpha=1/3)+
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_y_continuous() +
+  geom_smooth(se=FALSE)+
+  xlab("Number of students per teacher") +
+  ylab("Graduation rate") +
+  ggtitle("Graduation rate Vs Student per teacher ratio")
+```
+```{r}
+final_data_by_county %>% 
+  ggplot(aes(x=region,y=grad,fill=region) )+
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+```
+
+```{r}
+#expenditure per student and graduation rate
+final_data_by_county %>% 
+   select (grad,County,enrollment,expenditures,exp_per_student) %>% 
+  arrange(desc(exp_per_student)) %>% 
+  ggplot(aes(x=exp_per_student,y=grad)) +
+  geom_point(alpha=1/3)+
+  scale_y_log10() +
+  scale_x_log10() +
+  #scale_y_continuous(labels = comma) +
+  geom_smooth(se = FALSE) +
+  xlab("Expenditure(logged) per student") +
+  ylab("Graduation rate") +
+  ggtitle("Expenditure per student influencing graduation rate")
+
+
+```
+```{r}
+final_data_by_county %>% 
+   select (grad,County,chronic_abs) %>% 
+  arrange(desc(chronic_abs)) %>% 
+  ggplot(aes(x=chronic_abs,y=grad)) +
+  geom_point(alpha=1/3)+
+  scale_y_log10() +
+  scale_x_log10() +
+  #scale_y_continuous(labels = comma) +
+  geom_smooth(se = FALSE) +
+  xlab("Chronic Absenties") +
+  ylab("Graduation rate") +
+  ggtitle("Chronic Absenteeism Vs Graduation")
+
+```
+
+```{r}
+final_data_by_county %>% 
+   select (grad,County,enrollment,expenditures,exp_per_student) %>% 
+  arrange(desc(exp_per_student))
+
+```
+
+```{r}
+#math and graduation rate
+final_data_by_county %>% 
+   select (grad,County,math_mean) %>% 
+  arrange(desc(math_mean)) %>% 
+  ggplot(aes(x=math_mean,y=grad)) +
+  geom_point(alpha=1/3)+
+  #scale_y_continuous(labels = comma) +
+  geom_smooth(se = FALSE) +
+  xlab("Averge math scores") +
+  ylab("Graduation rate") +
+  ggtitle("Graduaton rate with Math scores")
+
+```
+
+```{r}
+#ed(economically disadvantaged) and graduation rate
+final_data_by_county %>% 
+   select (grad,County,ed) %>% 
+  arrange(desc(ed)) %>% 
+  ggplot(aes(x=ed,y=grad)) +
+  geom_point(alpha=1/3)+
+  #scale_y_continuous(labels = comma) +
+  geom_smooth(se = FALSE)
+```
+
+
+```{r}
+#english and graduation rate
+final_data_by_county %>% 
+   select (grad,County,eng_mean) %>% 
+  arrange(desc(eng_mean)) %>% 
+  ggplot(aes(x=eng_mean,y=grad)) +
+  geom_point(alpha=1/3)+
+ # scale_y_continuous(labels = comma) +
+  geom_smooth(se = FALSE)
+```
+
+
+```{r}
+#exp_per_student and graduation rate
+final_data_by_county %>% 
+   select (grad,County,exp_per_student) %>% 
+  arrange(desc(exp_per_student)) %>% 
+  ggplot(aes(x=exp_per_student,y=grad)) + 
+  geom_point(alpha=1/3)+
+  #scale_y_continuous(labels = comma) +
+  geom_smooth(se = FALSE)
+```
+
+
+```{r}
+final_data_by_county %>% 
+   select (grad,County,dropout) %>% 
+  arrange(desc(dropout)) %>% 
+  ggplot(aes(x=dropout,y=grad)) +
+  geom_point(alpha=1/3)+
+  #scale_y_continuous(labels = comma) +
+  geom_smooth(se = FALSE)
+
+```
+
+```{r}
+special<-final_data_by_county %>% 
+  select(enrollment,hispanic,black,native,el,swd,ed,grad)
+
+```
+
+Models
+Ordinary Regression Model
+ 
+
+```{r}
+#before we even start fitting the data into a model, lets split them into training set and test test
+index = createDataPartition(final_data_by_county$alg_1,p=0.75,list = FALSE)
+
+trainSet <- final_data_by_county[index,]
+testSet <- final_data_by_county[-index,]
+
+```
+#Michaels Method or OLS with all variables
+```{r}
+ols_ds<-final_data_by_county %>% 
+        select(-County)
+
+index = createDataPartition(ols_ds$grad, p = 0.75,list=FALSE)
+trainset <- ols_ds[index,]
+testset <- ols_ds[-index,]
+
+lr_fit<-train(grad~.,data=trainset,method="lm",
+              trControl = trainControl(method="none"))
+```
+
+```{r}
+#training set performance
+train_pred<-predict(lr_fit,newdata = trainset)
+MAE(pred=train_pred, obs=trainset$grad)# 0.8848448
+```
+```{r}
+#test set performance
+test_pred<-predict(lr_fit, newdata=testset)
+MAE(pred = test_pred,obs=testset$grad)# 1.817427
+```
+# OLS with selected features
+```{r}
+input <- trainSet[,c("teachers","avg_high_score","math_mean","act_composite","avg_income","chronic_abs","expenditures")]
+print(head(input))
+```
+Create relationship Model and get the Coefficients
+```{r}
+input <- trainSet[,c("grad","teachers","avg_high_score","math_mean","act_composite","avg_income","chronic_abs","expenditures","dropout")]
+
+#Create relationship Model
+model<-lm(grad~teachers+avg_high_score+math_mean+act_composite+avg_income+chronic_abs+expenditures+dropout, data = input)
+
+#Show the model
+print(model)
+
+#get th Intercept and coefficients as Vector elements
+a <- coef(model)[1]
+Xteachers<-coef(model)[2]
+Xavg_high_score<-coef(model)[3]
+Xmath_mean<-coef(model)[4]
+Xact_composite<-(model)[5]
+
+print(Xteachers)
+print(Xavg_high_score)
+print(Xmath_mean)
+print(Xact_composite)
+```
+```{r}
+#Based on the above intercept and coefficient values, we create the mathematical equation
+#FORMULA
+# Y= a + Xteachers.x1 + Xavg_high_score.x2 + Xmath_mean.x3 +  Xact_composite.x4
+```
+Apply Equation for predicting New values
+we can use the above equation to predit the graduation rate for a county when a new set of values for x variables are provided.
+For a county with teachers = 235
+                  avg_high_scores = 63
+                  math_mean = 70
+                  act_composite = 21
+                  avg_income=45000
+```{r}
+Y = 87.4748504 + 235 * ( -0.0016566 ) + 63 *(0.2029858 ) + 70*(-0.0458625) + 21 *(  -0.2981763) + 45000*(0.0000311 )
+Y#91.80108
+
+```
+#91.80108
+#] 88.92413
+                  
+```{r}
+train_pred<- predict(model, new = trainSet)
+MAE(pred=train_pred, obs=trainSet$grad)# 3.103281,3.025387(with income),2.849434
+
+```
+
+```{r}
+test_pred <- predict(model, new=testSet)
+MAE(pred=test_pred, obs=testSet$grad)#2.544554,2.978291,3.210088
+```
+
+do the cross validation to get the better MAE when you have time
+```{r}
+testSet %>% 
+  select(grad) %>% 
+  mutate(predicted_grad=test_pred)
+```
+#Lasso model
+```{r}
+predictors <- c("teachers","avg_high_score","math_mean","act_composite","avg_income","chronic_abs","expenditures")
+
+lasso_data_set <- final_data_by_county %>% 
+    select(predictors, 'grad')
+
+```
+## LASSO Regression
+We will be using the `glmnet` library which fits what are called "generalized linear models", which are a generalization of the linear regression models that we have encountered so far. LASSO and Ridge Regression are two examples of generalized linear models, but there are many others. Generalized linear models allow for more flexibility and/or different assumptions about the data generation process.
+```{r}
+
+index<- createDataPartition(lasso_data_set$grad, p=0.75,list= FALSE)
+
+trainSet<- lasso_data_set[index,]
+testSet<- lasso_data_set[-index,]
+```
+
+```{r}
+
+
+```
+Here, we can split off our predictor variables and our training and test sets.
+The `glmnet` library expects our data to be in a matrix, not in a tibble, so we need to convert it with `as.matrix()`.
+```{r}
+#Predictor variables
+x_train <- trainSet %>% 
+  select(-grad) %>% 
+  as.matrix()
+x_test<- testSet %>% 
+  select(-grad) %>% 
+  as.matrix()
+
+#Outcome Variable
+y_train <- trainSet$grad
+y_test  <- testSet$grad
+
+```
+Recall that we need to standardize our data when performing LASSO or ridge regression. The `glmnet` library does standardize the data, but we will do it ourselves so that we can better interpret the resulting model. To do this we will use the `preProcess` function from `caret`.
+```{r}
+preProcValues <- preProcess(x_train, method = c("center","scale"))
+
+x_trainTransformed <- predict(preProcValues,x_train)
+x_testTransformed<- predict(preProcValues,x_test)
+
+```
+The glmnet library offers built-in cross-fold validation for selection of hyperparameters. Here we need to decide on the value of $lambda$ for our LASSO model. Notice also that glmnet takes an $alpha$ argument. This can be used if we want to do a mix of LASSO and ridge regression (called elasticnet). For LASSO regression, we need to use `alpha = 1`.
+
+```{r}
+cv <- cv.glmnet(x_trainTransformed,y_train, alpha=1)#alpha = 1 means lasso and 0 means ridge regression
+```
+To see the best lambda value as determined by cross-fold validation, we can access `cv$lambda.min`.
+
+```{r}
+cv$lambda.min
+
+```
+Now, we can retrain a model on the whole dataset using the lambda value from above.
+```{r}
+lasso_model<-glmnet(x_trainTransformed,y_train, alpha = 1, lambda = cv$lambda.min)
+
+```
+Let's inspect the resulting model coefficients:
+```{r}
+coef(lasso_model)
+```
+
+
+```{r}
+coefplot(lasso_model,sort='magnitude')
+```
+Now, let's see how well the model performs.
+First, on the training data:
+```{r}
+train_pred<- predict(lasso_model,newx=x_trainTransformed)
+MAE(pred = train_pred, obs = y_train)# 2.97836
+```
+What about on the test set?
+
+```{r}
+test_pred<- predict(lasso_model,newx=x_testTransformed)
+MAE(pred=test_pred,obs=y_test)#3.183236
+```
+## Ridge Regression
+The code to create a ridge regression model is almost identical to the code above, except that we need to use `alpha = 0`.
+
+```{r}
+cv<- cv.glmnet(x_trainTransformed, y_train,alpha=0)
+ridge_model<-glmnet(x_trainTransformed, y_train,alpha=0,lambda = cv$lambda.min)
+coef(ridge_model)
+```
+
+```{r}
+coefplot(ridge_model,sort='magnitude')
+```
+
+```{r}
+#how did we do on the training set
+train_pred<- predict(ridge_model, newx = x_trainTransformed)
+MAE(pred=train_pred,obs=y_train)# 2.99
+```
+
+```{r}
+test_pred <- predict(ridge_model, newx = x_testTransformed)
+MAE(pred = test_pred, obs = y_test)# 3.60
+```
+```{r}
+#teachers vs graduation
+x<-final_data_by_county$exp_per_student
+y<-final_data_by_county$grad
+
+ggplot(final_data_by_county,aes(x,y)) +
+  geom_point(stat="identity")
+```
+
+```{r}
+#install.packages("ggpubr")
+
+ ggscatter(final_data_by_county, x= 'eng_mean', y='grad',
+          add= 'reg.line',conf.int=TRUE,
+          cor.coef=TRUE, cor.method= 'pearson',
+          xlab='Average English scores', ylab= 'Gradudation')+
+  theme(legend.position='none') +
+   ggtitle("English scores Vs Graduation rate")
+
+```
+```{r}
+#install.packages("ggpubr")
+#library('ggpubr')
+ ggscatter(final_data_by_county, x= 'avg_income', y='grad',
+          add= 'reg.line',conf.int=TRUE,
+          cor.coef=TRUE, cor.method= 'pearson',
+          xlab='Average Income', ylab= 'Gradudation')+
+  theme(legend.position='none') +
+  scale_x_log10()+
+   ggtitle("English scores Vs Graduation rate")
+
+```
+```{r}
+#there are no nulls in the dataset
+sum(is.na(train))
+```
+
+#Decision tree model
+```{r}
+
+#dt_ds<-final_data_by_county  
+
+#index = createDataPartition(dt_ds$grad, p = 0.75,list=FALSE)
+#train <- dt_ds[index,]
+#test <- dt_ds[-index,]
+
+#dtree_fit <- train(grad ~ .,data=train, method = "rpart")
+
+#dtree_fit<-train(grad~.,data=train,method="rpart")
+ 
+```
+
+```{r}
+#dtree_fit<-train(grad~.,data=train,method="rpart")
+```
+
+```{r}
+#prp(dtree_fit$finalModel, box.palette = "Reds", tweak = 1.2)
+
+```
+
+```{r}
+#how did it do on the training set
+#train_pred <-predict(dtree_fit, newdata=trainset)
+#MAE(pred=train_pred, obs=trainset$grad)#1.695956
+```
+```{r}
+#how did we do on the test set
+#test_pred <- predict(dtree_fit, newdata=testset)
+#MAE(pred=test_pred,obs=testset$grad)#1.715092
+```
+#Random forest model cross validation
+```{r}
+fitControl <- trainControl(method = "cv",
+                           number=3)
+
+```
+
+```{r}
+rf_fit <-train(grad~avg_high_score+math_mean+avg_income+chronic_abs+exp_per_student+eng_mean, data=trainset, method="ranger",trControl = fitControl, importance = "impurity") 
+            
+```
+
+```{r}
+rf_fit
+```
+
+```{r}
+#performamce on the training set
+train_pred<-predict(rf_fit,newdata=trainset)
+MAE(pred = train_pred, obs=trainset$grad)  
+```
+
+```{r}
+#performace on the test set
+test_pred <- predict(rf_fit, newdata=testset)
+MAE(pred=test_pred, obs=testset$grad) 
+```
+
+```{r}
+#look at the important features
+rfImp <- varImp(rf_fit)
+plot(rfImp)
+```
+#histograms
+
+```{r}
+final_data_by_county %>% 
+  ggplot(aes(x=grad)) +
+  geom_histogram() +
+  xlab("graduation rate")
+ylab("counts")
+```
+```{r}
+head(final_data_by_county)
+```
+
+ #PCA(Principal component Analysis) : trying to understand which features are best 
+```{r}
+#final_data_by_county
+
+educational_features <- prcomp(final_data_by_county %>% select(-region,-County,-is_good_ratio), center = TRUE, scale = TRUE)
+summary(educational_features)
+
+```
+```{r}
+educational_features
+
+```
+```{r}
+educational_features_projection = educational_features$x %>% 
+                                            as_tibble() 
+educational_features_projection
+```
+
+```{r}
+library(plotly)
+ educational_features_projection = educational_features$x %>% 
+  as_tibble() %>% 
+  cbind(final_data_by_county$region) %>%
+  rename(Region = `final_data_by_county$region`)
+ 
+P<-educational_features_projection %>% 
+  ggplot(aes(x = PC1, y = PC2, color = Region)) + geom_point()
+ggplotly(P)
+
+```
+```{r}
+educational_features$rotation
+```
+```{r}
+edu_scaled = scale(final_data_by_county[,3:34])
+edu_scaled[1,] %*% educational_features$rotation
+
+```
+```{r}
+ educational_features_projection[1,]
+```
+```{r}
+tibble(coefficient = educational_features$rotation[,1], variable = names(educational_features$rotation[,23])) %>% 
+  ggplot(aes(x = variable, y = coefficient)) + geom_col() + coord_flip()
+```
+```{r}
+tibble(coefficient = educational_features$rotation[,2], variable = names(educational_features$rotation[,1])) %>% 
+  ggplot(aes(x = variable, y = coefficient)) + geom_col() + coord_flip()
+```
+ UMAP:Uniform Manifold Approximation and Projection
+```{r}
+library(uwot)
+```
+```{r}
+final_data_umap <- umap(final_data_by_county %>% select(-region,-County,-is_good_ratio))
+final_data_umap %>% saveRDS('data/final_data_umap.RDS')
+#final_data_umap <- readRDS('data/mnist_umap.RDS')
+```
+```{r}
+pf<-final_data_umap %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = V1, y = V2, color = as.factor(final_data_by_county %>% pull(region)))) + 
+  geom_point() +
+  scale_color_discrete(name = 'Digit') + 
+  guides(colour = guide_legend(override.aes = list(size=2)))
+
+ggplotly(pf)
+```
+
+HDBSCAN - Hierarchical Density Based Spatial Clustering of Applications with Noise
+```{r}
+library(dbscan)
+```
+```{r}
+view(final_data_umap)
+```
+
+```{r}
+final_data_reduced<-final_data_by_county %>% 
+  select(grad,math_mean,ed,exp_per_student)
+```
+
+```{r}
+#we can do the hdbscan on the original dataset if we dont want to used the reduced one.(umap)
+final_data_umap_clusters <- hdbscan(final_data_umap  %>% as_tibble() , minPts =5 )
+```
+```{r}
+final_data_umap_clusters
+```
+```{r}
+head(final_data_umap_clusters)
+```
+```{r}
+final_data_umap<- data.frame(final_data_umap)
+final_data_umap
+```
+```{r}
+pl<-final_data_umap %>% 
+  mutate(cluster=final_data_umap_clusters$cluster) %>% 
+  filter(cluster !=0) %>% 
+  ggplot(aes(x= X1,y=X2,color =as.factor(cluster))) +
+  geom_point()
+ggplotly(pl)
+```
+
+```{r}
+final_data_by_county %>% 
+  mutate(cluster=final_data_umap_clusters$cluster) %>% 
+  filter(cluster==2)
+```
+
+
+```{r}
+#not make any sense here with UmAP as its not linear. may be PCA will give us some information.
+pl<-final_data_by_county %>% 
+  mutate(cluster=final_data_umap_clusters$cluster) %>% 
+  filter(cluster!=0) %>% 
+  ggplot(aes(x= sci_mean,y=grad,color =as.factor(cluster))) +
+  geom_point()
+ggplotly(pl)
+```
+KMEANS
+
+```{r}
+kmean_mnist <- kmeans(mnist_umap %>% as_tibble() %>% head(10000), centers = 10)
+```
+ 
